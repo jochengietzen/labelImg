@@ -58,6 +58,13 @@ def have_qstring():
 def util_qt_strlistclass():
     return QStringList if have_qstring() else list
 
+def printDict(self, highres = False):
+    assert isinstance(self, dict)
+    for x in self:
+        print (x)
+        if highres:
+            for y in self[x]:
+                print (y,':',self[x][y])
 
 class WindowMixin(object):
 
@@ -121,6 +128,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.itemsToShapes = {}
         self.shapesToItems = {}
+        self.itemsToShapesLastManual = {}
+        self.shapesToItemsLastManual = {}
+        self.lastManualFile = None
+        self.cameFromNext = False
         self.prevLabelText = ''
 
         listLayout = QVBoxLayout()
@@ -214,6 +225,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
         opendir = action(getStr('openDir'), self.openDirDialog,
                          'Ctrl+u', 'open', getStr('openDir'))
+        
+        refreshdir = action(getStr('refreshDir'), self.refreshDirAction,
+                         'Ctrl+Alt+R', 'refresh', getStr('refreshDir'))
 
         changeSavedir = action(getStr('changeSaveDir'), self.changeSavedirDialog,
                                'Ctrl+r', 'open', getStr('changeSavedAnnotationDir'))
@@ -343,7 +357,7 @@ class MainWindow(QMainWindow, WindowMixin):
                               fitWindow=fitWindow, fitWidth=fitWidth,
                               zoomActions=zoomActions,
                               fileMenuActions=(
-                                  open, opendir, save, saveAs, close, resetAll, quit),
+                                  open, opendir, refreshdir, save, saveAs, close, resetAll, quit),
                               beginner=(), advanced=(),
                               editMenu=(edit, copy, delete,
                                         None, color1, self.drawSquaresOption),
@@ -378,12 +392,18 @@ class MainWindow(QMainWindow, WindowMixin):
         self.displayLabelOption.setCheckable(True)
         self.displayLabelOption.setChecked(settings.get(SETTING_PAINT_LABEL, False))
         self.displayLabelOption.triggered.connect(self.togglePaintLabelsOption)
+        # Add option to enable multiple labeling
+        self.multiLabel = QAction(getStr('multiLabelMode'), self)
+        self.multiLabel.setCheckable(True)
+        self.multiLabel.setChecked(settings.get(SETTING_MULTI_LABEL, False))
+        self.multiLabel.triggered.connect(self.toggleMultiLabel)
 
         addActions(self.menus.file,
-                   (open, opendir, changeSavedir, openAnnotation, self.menus.recentFiles, save, save_format, saveAs, close, resetAll, quit))
+                   (open, opendir, refreshdir, changeSavedir, openAnnotation, self.menus.recentFiles, save, save_format, saveAs, close, resetAll, quit))
         addActions(self.menus.help, (help, showInfo))
         addActions(self.menus.view, (
             self.autoSaving,
+            self.multiLabel,
             self.singleClassMode,
             self.displayLabelOption,
             labels, advancedMode, None,
@@ -732,6 +752,90 @@ class MainWindow(QMainWindow, WindowMixin):
         self.actions.shapeLineColor.setEnabled(selected)
         self.actions.shapeFillColor.setEnabled(selected)
 
+    def checkShapeNotAlreadyThere(self, shape, dictionary=None):
+        if dictionary is None:
+            dictionary = self.shapesToItems
+        if shape in dictionary:
+            print("The Shape is already there!")
+            return False
+        else:
+            print("The Shape is a new one!")
+            return True
+        return True
+
+    def checkSaveLastManualShapeAndItem(self, shape = None, item = None):
+        print("We check for a shape of manual type", shape.manual)
+        if not shape.manual:
+            return
+        currIndex = self.mImgList.index(self.filePath)
+        print("The currently last manually modified file is ", self.lastManualFile)
+        if self.lastManualFile is None or self.lastManualFile != currIndex:
+            print("The file ", self.lastManualFile, " was last used as basis for the manual items.\n\tIt is now updated to ", currIndex)
+            self.lastManualFile = currIndex
+            self.itemsToShapesLastManual.clear()
+            self.shapesToItemsLastManual.clear()
+        else:
+            print("The file :", currIndex, " is currently open and will be used for further purposes")
+        
+        if shape is None:
+            print("No shape was given")
+            return
+        
+        if item is None:
+            print("No item was given. Try to retrieve it...")
+            try:
+                item = self.shapesToItems[shape]
+                assert not item is None
+            except:
+                print("Failed. Try to construct it...")
+                try:
+                    item = HashableQListWidgetItem(shape.label)
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    item.setCheckState(Qt.Checked)
+                    item.setBackground(generateColorByText(shape.label))
+                except:
+                    print("Failed. Return")
+                    return
+                else:
+                    print("Successfull")
+            else:
+                print("Successfull")
+
+        if self.lastManualFile == currIndex and self.checkShapeNotAlreadyThere(shape, self.shapesToItemsLastManual):
+            print("We will add the shape ", shape.label," to history!")
+            self.itemsToShapesLastManual[item] = shape
+            self.shapesToItemsLastManual[shape] = item
+            # printDict(self.itemsToShapesLastManual)
+            # printDict(self.shapesToItemsLastManual)
+            print("Manualshapes: ", len(self.itemsToShapesLastManual))
+
+    def formatShapeForAutoLabel(self, shape):
+        shape.manual = False
+        points = []
+        for point in shape.points:
+            # print(point)
+            points.append((point.x(), point.y()))
+        return (shape.label, points, None, None, shape.difficult)
+
+    def automatedLabeling(self):
+        if not self.multiLabel.isChecked():
+            return
+        assert len(self.itemsToShapesLastManual) == len(self.shapesToItemsLastManual)
+        print("Check for conditions")
+        if self.multiLabel.isChecked() and len(self.shapesToItems) == 0 and len(self.itemsToShapesLastManual) > 0:
+            print("Conditions met. Update shapes")
+            shapes = []
+            for shape in self.shapesToItemsLastManual:
+                obj = self.formatShapeForAutoLabel(shape)
+                if self.checkShapeNotAlreadyThere(shape):
+                    print("Shape ", shape.label, " is a new Shape. We will add it")
+                else:
+                    print("Shape ", shape.label, " is already known. nothing to do.")
+                shapes.append(obj)
+            self.loadLabels(shapes, manual=False)
+        else:
+            print("Nothing to update here")
+
     def addLabel(self, shape):
         shape.paintLabel = self.displayLabelOption.isChecked()
         item = HashableQListWidgetItem(shape.label)
@@ -740,6 +844,7 @@ class MainWindow(QMainWindow, WindowMixin):
         item.setBackground(generateColorByText(shape.label))
         self.itemsToShapes[item] = shape
         self.shapesToItems[shape] = item
+        self.checkSaveLastManualShapeAndItem(shape, item)
         self.labelList.addItem(item)
         for action in self.actions.onShapesPresent:
             action.setEnabled(True)
@@ -753,10 +858,10 @@ class MainWindow(QMainWindow, WindowMixin):
         del self.shapesToItems[shape]
         del self.itemsToShapes[item]
 
-    def loadLabels(self, shapes):
+    def loadLabels(self, shapes, manual=True):
         s = []
         for label, points, line_color, fill_color, difficult in shapes:
-            shape = Shape(label=label)
+            shape = Shape(label=label, manual=manual)
             for x, y in points:
 
                 # Ensure the labels are within the bounds of the image. If not, fix them.
@@ -1015,8 +1120,11 @@ class MainWindow(QMainWindow, WindowMixin):
             self.image = image
             self.filePath = unicodeFilePath
             self.canvas.loadPixmap(QPixmap.fromImage(image))
+            finishUpdateManual = False
             if self.labelFile:
                 self.loadLabels(self.labelFile.shapes)
+            else:
+                finishUpdateManual = True
             self.setClean()
             self.canvas.setEnabled(True)
             self.adjustScale(initial=True)
@@ -1048,6 +1156,11 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.loadYOLOTXTByFilename(txtPath)
 
             self.setWindowTitle(__appname__ + ' ' + filePath)
+
+            if self.cameFromNext and finishUpdateManual:
+                print("Update current Shapes with last manuals")
+                self.automatedLabeling()
+                self.cameFromNext = False
 
             # Default : select last item if there is at least one item
             if self.labelList.count():
@@ -1119,6 +1232,7 @@ class MainWindow(QMainWindow, WindowMixin):
             settings[SETTING_LAST_OPEN_DIR] = ''
 
         settings[SETTING_AUTO_SAVE] = self.autoSaving.isChecked()
+        settings[SETTING_MULTI_LABEL] = self.multiLabel.isChecked()
         settings[SETTING_SINGLE_CLASS] = self.singleClassMode.isChecked()
         settings[SETTING_PAINT_LABEL] = self.displayLabelOption.isChecked()
         settings[SETTING_DRAW_SQUARE] = self.drawSquaresOption.isChecked()
@@ -1189,6 +1303,20 @@ class MainWindow(QMainWindow, WindowMixin):
                                                      QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks))
         self.importDirImages(targetDirPath)
 
+    def refreshDirAction(self, _value=False):
+        if not self.mayContinue():
+            return
+        
+        dirpath=self.lastOpenDir
+        
+        defaultOpenDirPath = dirpath if dirpath else '.'
+        if self.lastOpenDir and os.path.exists(self.lastOpenDir):
+            defaultOpenDirPath = self.lastOpenDir
+        else:
+            defaultOpenDirPath = os.path.dirname(self.filePath) if self.filePath else '.'
+
+        self.importDirImages(defaultOpenDirPath)
+
     def importDirImages(self, dirpath):
         if not self.mayContinue() or not dirpath:
             return
@@ -1222,6 +1350,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.saveFile()
 
     def openPrevImg(self, _value=False):
+        print("Open previous Image")
         # Proceding prev image without dialog if having any label
         if self.autoSaving.isChecked():
             if self.defaultSaveDir is not None:
@@ -1247,6 +1376,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.loadFile(filename)
 
     def openNextImg(self, _value=False):
+        print("Open next Image")
         # Proceding prev image without dialog if having any label
         if self.autoSaving.isChecked():
             if self.defaultSaveDir is not None:
@@ -1271,6 +1401,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 filename = self.mImgList[currIndex + 1]
 
         if filename:
+            self.cameFromNext = True
             self.loadFile(filename)
 
     def openFile(self, _value=False):
@@ -1439,6 +1570,11 @@ class MainWindow(QMainWindow, WindowMixin):
     def togglePaintLabelsOption(self):
         for shape in self.canvas.shapes:
             shape.paintLabel = self.displayLabelOption.isChecked()
+
+    def toggleMultiLabel(self):
+        if self.multiLabel.isChecked():
+            self.displayLabelOption.setChecked(True)
+            self.togglePaintLabelsOption()
 
     def toogleDrawSquare(self):
         self.canvas.setDrawingShapeToSquare(self.drawSquaresOption.isChecked())
